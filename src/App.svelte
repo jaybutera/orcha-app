@@ -6,11 +6,13 @@
   import Projects from './screens/Projects.svelte';
   import ProjectDetail from './screens/ProjectDetail.svelte';
   import TaskDetail from './screens/TaskDetail.svelte';
+  import Sessions from './screens/Sessions.svelte';
   import Chat from './screens/Chat.svelte';
   import Usage from './screens/Usage.svelte';
   import SettingsSheet from './screens/SettingsSheet.svelte';
   import { app } from './lib/store.svelte';
   import { apiFailureText, bridge, projtrack } from './lib/api';
+  import { paneIdForRef } from './lib/pane-id';
   import { startChatWatch } from './lib/chat-watch';
   import type { Task } from './lib/types';
   import { onMount } from 'svelte';
@@ -20,7 +22,9 @@
 
   const route = $derived(app.route);
   // The bottom bar hides on Task detail and whenever a composer has focus (3.1).
-  const hideBar = $derived(route.screen === 'task' || composerFocused);
+  const hideBar = $derived(
+    route.screen === 'task' || route.screen === 'session' || composerFocused
+  );
 
   function openProject(id: number) {
     app.push({ screen: 'project', projectId: id });
@@ -30,23 +34,47 @@
     app.push({ screen: 'task', taskId: task.id, projectId: task.project_id });
   }
 
-  /** A chat event's pane id links to the task whose session_ref matches, found
-   *  from the cached /summary response (section 2.4). */
+  function openSessions() {
+    app.push({ screen: 'sessions' });
+  }
+
+  function openSession(paneId: string) {
+    app.push({ screen: 'session', paneId });
+  }
+
+  /**
+   * A chat event's pane id opens that session.
+   *
+   * It prefers the projtrack task where one matches, because the task screen
+   * carries the ledger's history alongside the transcript. But a pane with no
+   * task is the common case rather than the exception, and this used to answer
+   * it with a toast reading "No task for this pane" and go nowhere. The pane
+   * itself is always openable, so that is the fallback rather than a dead end.
+   *
+   * The lookup compares both spellings: projtrack stores `box:w6:p1` and the
+   * bridge issues `box/w6:p1`, so matching the raw ref alone missed every
+   * remote session.
+   */
   async function openPane(paneId: string) {
     try {
       const summary = await projtrack.summary(app.settings);
+      const wanted = paneIdForRef(paneId, app.machineNames);
       for (const p of summary.projects) {
         const hit = [...(p.running_tasks ?? []), ...(p.open_tasks ?? [])].find(
-          (t) => t.session_ref === paneId
+          (t) =>
+            t.session_ref === paneId ||
+            paneIdForRef(t.session_ref, app.machineNames) === wanted
         );
         if (hit) {
           app.openTask(hit.id, p.id);
           return;
         }
       }
-      app.showToast('No task for this pane');
+      app.openSession(wanted);
     } catch {
-      app.showToast('No task for this pane');
+      // projtrack is not answering; the bridge is a different backend and may
+      // well be. Opening the pane is still the thing that was asked for.
+      app.openSession(paneIdForRef(paneId, app.machineNames));
     }
   }
 
@@ -148,7 +176,7 @@
     <!-- 3.3 master-detail: Projects at 320px, detail in the second column. -->
     <div class="split">
       <div class="master">
-        <Projects onOpenProject={openProject} selectedId={selectedProjectId} />
+        <Projects onOpenProject={openProject} onOpenSessions={openSessions} selectedId={selectedProjectId} />
       </div>
       <div class="detail">
         {#if route.screen === 'task'}
@@ -159,6 +187,16 @@
               onComposerFocus={(f) => (composerFocused = f)}
             />
           {/key}
+        {:else if route.screen === 'session'}
+          {#key route.paneId}
+            <TaskDetail
+              paneId={route.paneId}
+              onBack={() => app.pop()}
+              onComposerFocus={(f) => (composerFocused = f)}
+            />
+          {/key}
+        {:else if route.screen === 'sessions'}
+          <Sessions onOpenSession={openSession} onBack={() => app.pop()} />
         {:else if route.screen === 'project'}
           {#key route.projectId}
             <ProjectDetail
@@ -175,7 +213,7 @@
   {:else}
     <div class="pane full">
       {#if route.screen === 'projects'}
-        <Projects onOpenProject={openProject} />
+        <Projects onOpenProject={openProject} onOpenSessions={openSessions} />
       {:else if route.screen === 'project'}
         {#key route.projectId}
           <div class="pushed">
@@ -191,6 +229,20 @@
           <div class="pushed">
             <TaskDetail
               taskId={route.taskId}
+              onBack={() => app.pop()}
+              onComposerFocus={(f) => (composerFocused = f)}
+            />
+          </div>
+        {/key}
+      {:else if route.screen === 'sessions'}
+        <div class="pushed">
+          <Sessions onOpenSession={openSession} onBack={() => app.pop()} />
+        </div>
+      {:else if route.screen === 'session'}
+        {#key route.paneId}
+          <div class="pushed">
+            <TaskDetail
+              paneId={route.paneId}
               onBack={() => app.pop()}
               onComposerFocus={(f) => (composerFocused = f)}
             />

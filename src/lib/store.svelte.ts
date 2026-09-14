@@ -10,7 +10,21 @@ export type Tab = 'fleet' | 'chat' | 'usage';
 export type FleetRoute =
   | { screen: 'projects' }
   | { screen: 'project'; projectId: number }
-  | { screen: 'task'; taskId: number; projectId: number };
+  | { screen: 'task'; taskId: number; projectId: number }
+  /**
+   * A session addressed by its pane, with no projtrack task in the way.
+   *
+   * The task route can only reach a session projtrack has a row for, and the
+   * ledger is not a reliable index of what is running: measured against the
+   * live daemon on 2026-09-14, 5 of 11 running panes had no task at all (the
+   * Codex pane among them) and 16 of 22 task session_refs named panes that no
+   * longer existed. Those five had no route into the app, and the sixteen
+   * opened onto a dead pane. This route addresses the pane the bridge is
+   * actually serving, so every live session can be opened and answered.
+   */
+  | { screen: 'session'; paneId: string }
+  /** The list of those sessions, straight from the bridge's /panes. */
+  | { screen: 'sessions' };
 
 class AppStore {
   settings = $state<Settings>({ ...DEFAULTS });
@@ -151,6 +165,14 @@ class AppStore {
     });
     if (tab === 'chat') this.chatUnreadCount = 0;
     if (typeof location !== 'undefined') history.replaceState(history.state, '', tab === 'fleet' ? location.pathname + location.search : `#${tab}`);
+  }
+
+  /** Open a session by its bridge pane id, from the Sessions list or a chat event. */
+  openSession(paneId: string) {
+    // The Sessions list sits under it, so Back from a session deep-linked out
+    // of chat lands somewhere useful rather than at the project root.
+    this.stack = [{ screen: 'projects' }, { screen: 'sessions' }, { screen: 'session', paneId }];
+    this.setTab('fleet');
   }
 
   /** Deep link from a chat event: push the task and switch to Fleet. */

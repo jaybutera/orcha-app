@@ -847,3 +847,102 @@ describe('while the pane list has not arrived', () => {
     expect(view.container.textContent).toContain('sendrawtransaction');
   });
 });
+
+// Opening a session directly on its pane (section 5.3c).
+//
+// The task route can only reach a session projtrack has a row for, and against
+// the live daemon on 2026-09-14 that was 6 of 11 running panes: 5 had no task
+// at all, and 16 of the 22 task refs named panes that no longer existed. These
+// are the cases that route could not serve.
+describe('a session opened on its pane', () => {
+  /** A Codex pane with no projtrack task, as /panes reports it. */
+  const CODEX_PANE: Pane = {
+    pane_id: 'wH5:p1',
+    machine: 'local',
+    workspace_id: 'wH5',
+    label: 'reserve yield design',
+    cwd: '/home/casper/src/launchpad-integrated',
+    agent_status: 'idle',
+    provider: 'codex',
+  };
+
+  const drawSession = (paneId: string) =>
+    render(TaskDetail, { props: { paneId, onBack: () => {} } });
+
+  beforeEach(() => {
+    app.setPanes([CODEX_PANE]);
+    app.setMachines([{ name: 'local', reachable: true }]);
+    app.panesKnown = true;
+    reads.mockResolvedValue({
+      pane_id: 'wH5:p1',
+      agent_status: 'idle' as const,
+      read_at: '2026-09-07T19:56:23Z',
+      text: '• The buffer is raw USDC and earns nothing.',
+    });
+  });
+
+  it('never asks projtrack for a task', async () => {
+    drawSession('wH5:p1');
+    await flush();
+    expect(task).not.toHaveBeenCalled();
+  });
+
+  it('reads the pane straight away, without waiting for a ledger row', async () => {
+    drawSession('wH5:p1');
+    await flush();
+    expect(reads).toHaveBeenCalled();
+    expect(reads.mock.calls[0][1]).toBe('wH5:p1');
+  });
+
+  it('shows what the agent said', async () => {
+    drawSession('wH5:p1');
+    await flush();
+    expect(await screen.findByText(/buffer is raw USDC/)).toBeTruthy();
+  });
+
+  it('is the live view even though the agent is idle', async () => {
+    // The task route needs `status === 'running'`, so an idle pane fell through
+    // to history mode and showed a note composer instead of the transcript.
+    drawSession('wH5:p1');
+    await flush();
+    expect(screen.getByPlaceholderText('Message this session…')).toBeTruthy();
+  });
+
+  it('keeps polling, so a reply appears without leaving the screen', async () => {
+    drawSession('wH5:p1');
+    await flush();
+    const first = reads.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(store.intervals.pane + 50);
+    await flush();
+    expect(reads.mock.calls.length).toBeGreaterThan(first);
+  });
+
+  it('titles the screen with the pane label rather than a blank task title', async () => {
+    drawSession('wH5:p1');
+    await flush();
+    expect(screen.getByText('reserve yield design')).toBeTruthy();
+  });
+
+  it('says so plainly when the bridge has dropped the pane', async () => {
+    // No ledger row behind this screen, so there is no history to fall back to.
+    app.setPanes([]);
+    reads.mockRejectedValue(new ApiError('HTTP 404', 404));
+    drawSession('wH5:p1');
+    await flush();
+    expect(await screen.findByText(/session is gone/i)).toBeTruthy();
+  });
+
+  it('does not render a blank transcript when the pane is silent', async () => {
+    // A read that succeeds with empty text used to draw nothing at all: the
+    // placeholder only covered the window before the first answer.
+    reads.mockResolvedValue({
+      pane_id: 'wH5:p1',
+      agent_status: 'idle' as const,
+      read_at: '2026-09-07T19:56:23Z',
+      text: '',
+    });
+    drawSession('wH5:p1');
+    await flush();
+    expect(await screen.findByText(/has not printed anything yet/i)).toBeTruthy();
+  });
+});
