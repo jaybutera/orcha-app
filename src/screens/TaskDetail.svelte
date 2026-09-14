@@ -21,7 +21,13 @@
   import { app } from '../lib/store.svelte';
   import { ApiError, apiFailureText, bridge, PANE_LINES, PANE_LINES_MAX, projtrack } from '../lib/api';
   import { parsePane, type Block } from '../lib/pane-parse';
-  import { isRefUnresolved, isRemote, machineForRef, paneIdForRef } from '../lib/pane-id';
+  import {
+    isRefUnresolved,
+    isRemote,
+    machineForPaneId,
+    machineForRef,
+    paneIdForRef,
+  } from '../lib/pane-id';
   import { isSettled, liveTaskStatus, paneIsGone, shouldPollPane } from '../lib/live';
   import { clockTime, dayKey, dayLabel, relativeTime, statusSpec } from '../lib/format';
   import type { AgentStatus, TaskDetail } from '../lib/types';
@@ -105,9 +111,18 @@
     // it came from /panes. Only a ledger ref needs translating.
     paneId ?? paneIdForRef(task?.session_ref, app.machineNames)
   );
-  /** Which machine this session is on, shown when it is not this laptop. */
+  /**
+   * Which machine this session is on, shown when it is not this laptop.
+   *
+   * Read out of the pane id itself, never looked up in the pane list. The
+   * bridge drops an unreachable machine's panes from /panes, so a lookup
+   * answers `local` exactly when the forward to that machine has died — and
+   * `local` is what silences the machine-down banner, ungates the poll, and
+   * leaves a stale transcript on screen under a live-looking header while every
+   * read returns 503. The id is the one signal that survives the outage.
+   */
   const sessionMachine = $derived(
-    paneId ? (app.paneIndex.get(paneId)?.machine ?? 'local') : machineForRef(task?.session_ref, app.machineNames)
+    paneId ? machineForPaneId(paneId) : machineForRef(task?.session_ref, app.machineNames)
   );
   /**
    * True while a `<machine>:<id>` ref has no machine list to resolve against.

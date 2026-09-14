@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 import {
   isRefUnresolved,
   isRemote,
+  machineForPaneId,
   machineForRef,
   paneIdForRef,
   parseSessionRef,
@@ -181,5 +182,45 @@ describe('isRefUnresolved', () => {
     // The list answered and does not name `zzz`, so the ref is as resolved as
     // it will get: waiting longer would never change the answer.
     expect(isRefUnresolved('zzz:w1:p1', MACHINES)).toBe(false);
+  });
+});
+
+// The machine a bridge pane id names, from the id alone.
+//
+// This exists because the pane list cannot answer the question when it matters.
+// The bridge drops an unreachable machine's panes from /panes, so looking the
+// machine up there returns nothing exactly when the forward to that machine has
+// died — and the fallback, 'local', is what switches off the machine-down
+// banner and the poll gate that the outage is supposed to trigger.
+describe('machineForPaneId', () => {
+  it('reads the machine off a prefixed id', () => {
+    expect(machineForPaneId('box/w6:p1')).toBe('box');
+    expect(machineForPaneId('lab/term_65ae80c6b3d341')).toBe('lab');
+  });
+
+  it('calls a bare id local, colons and all', () => {
+    expect(machineForPaneId('w95:p1')).toBe('local');
+  });
+
+  it('does not need a machine list to say so', () => {
+    // machineForRef cannot do this: `box:w6:p1` is indistinguishable from a
+    // local pane id until the list arrives. The slash is why the bridge spells
+    // it this way, and why this answer holds during an outage.
+    expect(machineForPaneId('box/w6:p1')).toBe('box');
+  });
+
+  it('treats nothing, and a leading slash, as local', () => {
+    expect(machineForPaneId('')).toBe('local');
+    expect(machineForPaneId(undefined)).toBe('local');
+    expect(machineForPaneId(null)).toBe('local');
+    // No name in front of the slash, so there is no machine named.
+    expect(machineForPaneId('/w1:p1')).toBe('local');
+  });
+
+  it('agrees with machineForRef once the list has arrived', () => {
+    const machines = ['local', 'box'];
+    expect(machineForPaneId(paneIdForRef('box:w6:p1', machines))).toBe(
+      machineForRef('box:w6:p1', machines)
+    );
   });
 });
