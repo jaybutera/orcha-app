@@ -21,17 +21,43 @@
   import { app } from '../lib/store.svelte';
   import { ApiError, apiFailureText, bridge, PANE_LINES, PANE_LINES_MAX, projtrack } from '../lib/api';
   import { parsePane, type Block } from '../lib/pane-parse';
-  import { isRefUnresolved, isRemote, machineForRef, paneIdForRef } from '../lib/pane-id';
+  import {
+    isRefUnresolved,
+    isRemote,
+    machineForPaneId,
+    machineForRef,
+    paneIdForRef,
+  } from '../lib/pane-id';
   import { isSettled, liveTaskStatus, paneIsGone, shouldPollPane } from '../lib/live';
   import { clockTime, dayKey, dayLabel, relativeTime, statusSpec } from '../lib/format';
   import type { AgentStatus, TaskDetail } from '../lib/types';
   import { onMount, tick } from 'svelte';
 
+  /**
+   * One screen, two ways in.
+   *
+   * `taskId` opens a projtrack task and finds its session from `session_ref`.
+   * `paneId` opens a session directly, with no task in the way: the Sessions
+   * list addresses the panes the bridge is serving, most of which the ledger
+   * either does not know about or names with a ref whose pane is long gone.
+   * Exactly one is given. Everything below the pane id is shared, which is the
+   * point: the live transcript, the composer and the quick keys are the same
+   * code either way.
+   */
   let {
     taskId,
+    paneId,
     onBack,
     onComposerFocus,
-  }: { taskId: number; onBack: () => void; onComposerFocus?: (focused: boolean) => void } = $props();
+  }: {
+    taskId?: number;
+    paneId?: string;
+    onBack: () => void;
+    onComposerFocus?: (focused: boolean) => void;
+  } = $props();
+
+  /** True when this screen was opened on a pane rather than on a task. */
+  const sessionOnly = $derived(paneId !== undefined);
 
   let task = $state<TaskDetail | null>(null);
   let loadingTask = $state(true);
@@ -46,7 +72,18 @@
   /** Set when the bridge answered but could not reach the machine the pane is on. */
   let machineUnreachable = $state(false);
   let paneFailures = 0;
-  let firstRead = $state(true);
+  /**
+   * Whether any read has come back with an answer, as opposed to having run.
+   *
+   * This replaces a `firstRead` flag cleared in the read's `finally`, which
+   * went false on a read that threw. The difference is the whole bug: a bridge
+   * that failed on the first call put "This session has not printed anything
+   * yet" on screen — a statement about the agent — when nothing had been read
+   * at all, and it stood for up to two more poll intervals before the failure
+   * count reached three and the error banner replaced it. Only a read that
+   * answered can say what the agent has or has not printed.
+   */
+  let paneAnswered = $state(false);
   let view = $state<'messages' | 'terminal'>('messages');
   /** Set when a finished task's session is still alive and the user opened it. */
   let forceLive = $state(false);
@@ -80,9 +117,24 @@
    * every call that reaches a pane goes through this rather than through
    * session_ref directly. Local sessions come back unchanged.
    */
-  const bridgePaneId = $derived(paneIdForRef(task?.session_ref, app.machineNames));
-  /** Which machine this session is on, shown when it is not this laptop. */
-  const sessionMachine = $derived(machineForRef(task?.session_ref, app.machineNames));
+  const bridgePaneId = $derived(
+    // A pane id from the Sessions list is already the bridge's own spelling;
+    // it came from /panes. Only a ledger ref needs translating.
+    paneId ?? paneIdForRef(task?.session_ref, app.machineNames)
+  );
+  /**
+   * Which machine this session is on, shown when it is not this laptop.
+   *
+   * Read out of the pane id itself, never looked up in the pane list. The
+   * bridge drops an unreachable machine's panes from /panes, so a lookup
+   * answers `local` exactly when the forward to that machine has died — and
+   * `local` is what silences the machine-down banner, ungates the poll, and
+   * leaves a stale transcript on screen under a live-looking header while every
+   * read returns 503. The id is the one signal that survives the outage.
+   */
+  const sessionMachine = $derived(
+    paneId ? machineForPaneId(paneId) : machineForRef(task?.session_ref, app.machineNames)
+  );
   /**
    * True while a `<machine>:<id>` ref has no machine list to resolve against.
    *
@@ -90,7 +142,11 @@
    * has never issued, and gets HTTP 404 back for a session that is working.
    * Nothing calls the bridge until the list lands.
    */
-  const refPending = $derived(isRefUnresolved(task?.session_ref, app.machineNames));
+  // A pane id from /panes is never pending: it is the id the bridge issued, so
+  // there is no machine list to wait for and no ref to translate.
+  const refPending = $derived(
+    sessionOnly ? false : isRefUnresolved(task?.session_ref, app.machineNames)
+  );
 
   /**
    * True when the machine this session is on is known to be down.
@@ -145,8 +201,14 @@
    */
   const paneReallyGone = $derived(paneIsGone(paneGone, paneListed));
 
+  // A session opened on its pane is always the live view: there is no ledger
+  // row to consult and no history list to fall back to. It stays live even
+  // once the agent goes idle or done, because reading what it said and
+  // answering it is the whole reason the screen was opened.
   const isLive = $derived(
-    !!task && !!task.session_ref && (task.status === 'running' || forceLive) && !paneReallyGone
+    sessionOnly
+      ? !paneReallyGone
+      : !!task && !!task.session_ref && (task.status === 'running' || forceLive) && !paneReallyGone
   );
 
   /**
@@ -167,8 +229,10 @@
    */
   const shouldPoll = $derived(
     shouldPollPane({
-      hasSession: !!task && !!task.session_ref,
-      ledgerRunning: task?.status === 'running',
+      hasSession: sessionOnly || (!!task && !!task.session_ref),
+      // No ledger to ask. The pane itself is the only authority here, and the
+      // poll is what keeps a working session's text arriving.
+      ledgerRunning: sessionOnly || task?.status === 'running',
       forceLive,
       refPending,
       paneReallyGone,
@@ -219,6 +283,12 @@
   );
 
   async function loadTask() {
+    // Opened on a pane: there is no task to load, and asking projtrack for one
+    // would raise a banner about a backend this screen does not need.
+    if (taskId === undefined) {
+      loadingTask = false;
+      return;
+    }
     try {
       task = await projtrack.task(app.settings, taskId);
       taskError = null;
@@ -268,6 +338,7 @@
       paneError = null;
       machineUnreachable = false;
       paneFailures = 0;
+      paneAnswered = true;
       app.noteSuccess();
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) {
@@ -300,13 +371,13 @@
           !!app.settings.token
         );
       app.noteFailure();
-    } finally {
-      firstRead = false;
     }
   }
 
   /** A finished task whose pane is still alive gets an "Open session" button. */
   async function checkSession() {
+    // Already in the live view; nothing to offer to open.
+    if (sessionOnly) return;
     if (!task?.session_ref || task.status === 'running') return;
     // Same unresolved-ref race as readPane: a 404 here would report a live
     // session on another machine as dead.
@@ -404,7 +475,11 @@
     }
   }
 
+  // Both of these write to a projtrack row. Neither is reachable without one:
+  // the note composer belongs to history mode and the menu is only offered when
+  // a task loaded, so the guard is the type's, not a case to handle.
   async function addNote(note: string) {
+    if (taskId === undefined) return;
     try {
       await projtrack.addNote(app.settings, taskId, note);
       app.showToast('Note added');
@@ -415,6 +490,7 @@
   }
 
   async function abandon() {
+    if (taskId === undefined) return;
     try {
       await projtrack.setTaskStatus(app.settings, taskId, 'abandoned');
       app.showToast('Marked abandoned');
@@ -425,6 +501,9 @@
   }
 
   onMount(() => {
+    // A session opened on its pane reads immediately: nothing has to be
+    // fetched first to learn which pane it is.
+    if (sessionOnly) void readPane();
     void loadTask().then(() => {
       void checkSession();
       if (task?.status === 'running' && task.session_ref) void readPane();
@@ -434,7 +513,7 @@
       if (app.visible && shouldPoll) void readPane();
     }, app.intervals.pane);
     const taskTimer = setInterval(() => {
-      if (app.visible) void loadTask();
+      if (app.visible && !sessionOnly) void loadTask();
     }, 15_000);
     return () => {
       clearInterval(paneTimer);
@@ -489,19 +568,33 @@
 
   /** History events grouped with a divider whenever the day changes. */
   const events = $derived(task?.events ?? []);
+
+  /**
+   * What the header calls this screen.
+   *
+   * A task has a title. A session has whatever the pane list calls it, which is
+   * the agent's own name where it set one and the workspace label otherwise;
+   * the pane id is the last resort, and is at least unambiguous.
+   */
+  const screenTitle = $derived.by(() => {
+    if (!sessionOnly) return task?.title ?? '';
+    return app.paneIndex.get(bridgePaneId)?.label || paneLabel || bridgePaneId;
+  });
 </script>
 
-<Header title={task?.title ?? ''} onBack={onBack} compact onMore={task ? () => (menuOpen = true) : undefined}>
+<Header title={screenTitle} onBack={onBack} compact onMore={task ? () => (menuOpen = true) : undefined}>
   {#snippet subtitle()}
-    {#if task}
+    {#if task || sessionOnly}
       {#if isLive}
+        <!-- The ledger's ref where there is one, so the line keeps naming the
+             session the way the task does; the bridge's own id otherwise. -->
         <LiveStatusLine
           agentStatus={headerStatus}
-          paneId={task.session_ref}
+          paneId={task?.session_ref ?? bridgePaneId}
           machine={sessionMachine}
-          label={paneLabel}
+          label={sessionOnly ? undefined : paneLabel}
         />
-      {:else}
+      {:else if task}
         <!-- `histStatus` rather than `task.status`: with the pane gone the
              ledger still says running, and printing that put "Running" directly
              above a banner reading "Pane gone". -->
@@ -555,8 +648,19 @@
         <p class="earlier-end t-meta">Start of available scrollback</p>
       {/if}
     {/if}
-    {#if firstRead && !paneText}
+    {#if !paneText && !paneAnswered}
+      <!-- Nothing has been read yet, whether because the first read is still in
+           flight or because it failed. Either way the honest line is that the
+           pane is being read; what the agent has printed is not yet known, and
+           the error banner below says so once the failures add up. -->
       <p class="t-meta center">{waitingLabel}</p>
+    {:else if !paneText}
+      <!-- A read came back, and the screen was empty. Rendering the block loop
+           here drew literally nothing: a blank scroller under a header saying
+           "Working", with no way to tell a silent agent from a broken view.
+           Gated on a read having answered, not merely having run, so a failed
+           read never states a fact about the agent. -->
+      <EmptyState text="This session has not printed anything yet" />
     {:else if view === 'terminal'}
       <TerminalView text={paneText} />
     {:else}
@@ -571,6 +675,10 @@
           <DialogCard lines={b.lines} />
         {:else if b.kind === 'spinner'}
           <SpinnerLine word={b.word} elapsed={b.elapsed} />
+        {:else if b.kind === 'raw'}
+          <!-- No glyph on this screen was recognised. Showing it verbatim beats
+               an empty Messages tab, which is what an unknown TUI used to get. -->
+          <TerminalView text={b.text} />
         {/if}
       {/each}
       {#each visiblePending as p (p.at)}
@@ -604,6 +712,13 @@
       disabled={paneReallyGone || refPending}
       alertDigits={paneStatus === 'blocked'}
     />
+  </div>
+{:else if sessionOnly}
+  <!-- Opened on a pane the bridge no longer has. There is no ledger row behind
+       this screen to fall back to, so it says that plainly rather than offering
+       a note composer for a task that does not exist. -->
+  <div class="scroll">
+    <EmptyState text="This session is gone. The pane bridge no longer lists it." />
   </div>
 {:else}
   <!-- 5.3b history mode -->

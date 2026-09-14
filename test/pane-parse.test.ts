@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { parsePane } from '../src/lib/pane-parse';
 
 const real = readFileSync(new URL('./fixtures-pane-real.txt', import.meta.url), 'utf8');
+/** A live Codex pane, captured from wH5:p1 through the bridge on 2026-09-14. */
+const codex = readFileSync(new URL('./fixtures-pane-codex.txt', import.meta.url), 'utf8');
 
 describe('parsePane', () => {
   it('keeps every prose block, not only the last', () => {
@@ -98,5 +100,103 @@ describe('parsePane', () => {
   it('returns nothing for an empty pane', () => {
     expect(parsePane('')).toEqual([]);
     expect(parsePane('\n\n  \n')).toEqual([]);
+  });
+
+  // Codex draws its turns with `•` and its input line with `›`, where Claude
+  // Code uses `●` and `❯`. Against this fixture the Claude-only grammar
+  // produced zero blocks from 198 lines, so the Messages view of every Codex
+  // session was blank while the pane read had succeeded.
+  describe('a Codex pane', () => {
+    const blocks = parsePane(codex);
+
+    it('is not empty', () => {
+      expect(blocks.length).toBeGreaterThan(0);
+      expect(blocks.some((b) => b.kind === 'message')).toBe(true);
+    });
+
+    it('reads the agent prose off the screen', () => {
+      const first = blocks.find((b) => b.kind === 'message');
+      expect(first && first.kind === 'message' && first.text).toContain(
+        'This shares the core of our latest design'
+      );
+    });
+
+    it('keeps the operator’s own lines apart from the agent’s', () => {
+      expect(blocks.some((b) => b.kind === 'user')).toBe(true);
+    });
+
+    it('does not fall back to the raw screen when the grammar matched', () => {
+      // `raw` is the last resort for an unrecognised TUI. Seeing it here would
+      // mean the Codex glyphs stopped matching and the fixture was carrying
+      // the test on the fallback alone.
+      expect(blocks.some((b) => b.kind === 'raw')).toBe(false);
+    });
+
+    it('does not swallow the composer into the last message', () => {
+      const texts = blocks.filter((b) => b.kind === 'message').map((b) => (b as { text: string }).text);
+      expect(texts.some((t) => t.includes('Ask Codex to do anything'))).toBe(false);
+    });
+  });
+
+  // The parser is allowed to be wrong about a TUI it has never seen; it is not
+  // allowed to render that pane as nothing. The Terminal tab shows the same
+  // text, and this is the Messages tab declining to claim the pane is silent.
+  describe('a pane whose grammar is unrecognised', () => {
+    it('falls back to the screen text rather than an empty view', () => {
+      const text = ['agent> thinking about it', 'the answer is 4', 'done in 3s'].join('\n');
+      const blocks = parsePane(text);
+      expect(blocks).toHaveLength(1);
+      expect(blocks[0].kind === 'raw' && blocks[0].text).toContain('the answer is 4');
+    });
+
+    it('still returns nothing when the screen really is blank', () => {
+      expect(parsePane('   \n\n  ')).toEqual([]);
+    });
+  });
+});
+
+// A prompt longer than the pane is wide wraps, and the continuation lines carry
+// no glyph. They used to match nothing and be discarded, so a reader saw the
+// first line of their own message and nothing after it. Rare on Claude Code,
+// the common case on Codex, whose composer takes multi-line input.
+describe('a prompt that wrapped across lines', () => {
+  it('keeps the continuation, not just the first line', () => {
+    const text = [
+      '› what do you mean eliminate migration machinery? When it comes to defi,',
+      '  every line we change must be audited',
+      '',
+      '• I think that is a credible concern.',
+    ].join('\n');
+    const user = parsePane(text).find((b) => b.kind === 'user');
+    expect(user && user.kind === 'user' && user.text).toContain('every line we change must be audited');
+  });
+
+  it('ends the prompt at the blank line, not at the next glyph', () => {
+    // The empty composer's own prompt line sits two lines above the model and
+    // cwd status bar. Running past the blank line would absorb it.
+    const text = ['› ', '', '  gpt-6-astra medium · ~/src/launchpad-integrated'].join('\n');
+    const user = parsePane(text).find((b) => b.kind === 'user');
+    expect(user).toBeUndefined();
+  });
+
+  it('does not take an indented agent bullet as a continuation', () => {
+    const text = ['❯ run the tests', '  ● Running them now.'].join('\n');
+    const blocks = parsePane(text);
+    const user = blocks.find((b) => b.kind === 'user');
+    expect(user && user.kind === 'user' && user.text).toBe('run the tests');
+  });
+
+  it('reads the wrapped prompts out of the live Codex capture', () => {
+    const users = parsePane(codex).filter((b) => b.kind === 'user') as { text: string }[];
+    expect(users.some((u) => u.text.includes('\n'))).toBe(true);
+    // The status bar is not part of anything Casper typed.
+    expect(users.some((u) => u.text.includes('gpt-6-astra'))).toBe(false);
+  });
+
+  it('does not read the empty composer placeholder as a message', () => {
+    // "Ask Codex to do anything" is drawn inside the input box, on the prompt
+    // line, so it read as the last thing Casper said in every idle Codex pane.
+    const users = parsePane(codex).filter((b) => b.kind === 'user') as { text: string }[];
+    expect(users.some((u) => u.text.includes('Ask Codex to do anything'))).toBe(false);
   });
 });

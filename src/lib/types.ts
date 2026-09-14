@@ -88,6 +88,13 @@ export interface Pane {
   label: string;
   cwd: string;
   agent_status: AgentStatus;
+  /**
+   * Which agent holds the pane: 'claude', 'codex', or 'unknown'.
+   *
+   * Optional because a bridge older than this field simply omits it, and the
+   * transcript parser copes with either TUI without being told which it has.
+   */
+  provider?: string;
 }
 
 export interface Machine {

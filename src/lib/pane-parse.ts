@@ -11,11 +11,27 @@ export type Block =
   | { kind: 'tool'; head: string; result: string[] }
   | { kind: 'user'; text: string }
   | { kind: 'dialog'; lines: string[] }
-  | { kind: 'spinner'; word: string; elapsed: string };
+  | { kind: 'spinner'; word: string; elapsed: string }
+  /** The whole screen, when no glyph in it was recognised. */
+  | { kind: 'raw'; text: string };
 
-const MSG_BULLET = /^[●⏺]\s?/;
+/**
+ * The glyph an agent puts in front of its own turn.
+ *
+ * Claude Code draws `●`/`⏺`; Codex draws `•`. Both are in one class because the
+ * rest of the grammar below is the same shape for either TUI, and because a
+ * pane's provider is not always known: `/panes` reports `unknown` for an agent
+ * herdr cannot identify, and the parser still has to do something useful.
+ * Matching both glyphs everywhere is what makes that possible.
+ *
+ * Before `•` was here a live Codex pane parsed to zero blocks from 199 lines of
+ * real output (measured against pane wH5:p1 on 2026-09-14), and the Messages
+ * view rendered nothing at all.
+ */
+const MSG_BULLET = /^[●⏺•]\s?/;
 const TOOL_HEAD = /^[A-Za-z][\w-]*\(/;
-const USER_PROMPT = /^\s*❯\s?(.*)$/;
+/** `❯` is Claude Code's input line, `›` is Codex's. */
+const USER_PROMPT = /^\s*[❯›]\s?(.*)$/;
 /** Only a corner glyph opens a dialog. A bare `│` also starts every row of a
  *  markdown table the agent printed inside its own prose (observed in a live
  *  pane on 2026-09-06), so matching it would turn tables into DialogCards. */
@@ -29,11 +45,17 @@ const RESULT_LINE = /^\s*⎿\s?/;
 const RULE_LINE = /^\s*[─━]{3,}\s*$/;
 
 // Lines that end the transcript area: input box, status bar, spinner, recap.
-const PANE_FOOTER = /^\s*(?:[─━]{3,}\s*$|❯|⏵|[✻✽✶✳✢]\s|※)/;
+// `›` is Codex's input line, the counterpart of Claude Code's `❯`; without it a
+// Codex message block ran on through the composer and the model/cwd status bar.
+const PANE_FOOTER = /^\s*(?:[─━]{3,}\s*$|[❯›]|⏵|[✻✽✶✳✢]\s|※)/;
 
 const PANE_CHROME: RegExp[] = [
   /^\s*[─━]{3,}\s*$/,
   /^\s*⧉/,
+  // The placeholder text an empty composer draws inside the input box. It sits
+  // on the prompt line, so it reads as something Casper typed; it is the one
+  // thing on that line they did not type.
+  /^\s*(?:Ask Codex to do anything|Try ".{0,60}")\s*$/,
   /\/clear to save \S+ tokens/,
   /\(disable recaps in \/config\)/,
   /^\s*\? for shortcuts/,
@@ -100,10 +122,34 @@ export function parsePane(paneText: string): Block[] {
     // Casper's own prompt, echoed in the pane.
     const user = USER_PROMPT.exec(line);
     if (user) {
-      const text = user[1].trim();
-      // A bare "❯" is the empty input box, not a message.
-      if (text) blocks.push({ kind: 'user', text });
+      const head = isChrome(user[1]) ? '' : user[1].trim();
       i++;
+      // A prompt longer than the pane is wide wraps, and the continuations are
+      // indented under it with no glyph of their own, so they matched nothing
+      // and fell through to the discard at the bottom of the loop: the reader
+      // saw the first line of their own message and nothing after it. Rare on
+      // Claude Code, where prompts are usually short, and the common case on
+      // Codex, whose composer takes multi-line input.
+      //
+      // Only indented, non-empty, non-chrome lines continue it. A blank line
+      // ends the prompt, which is what keeps the empty composer's own `›` from
+      // swallowing the model and cwd status bar two lines below it.
+      const body = [head];
+      while (i < lines.length) {
+        const next = lines[i];
+        if (!next.trim()) break;
+        if (!/^\s{2,}\S/.test(next)) break;
+        if (isChrome(next) || PANE_FOOTER.test(next)) break;
+        // An indented line that opens with a glyph belongs to whoever draws
+        // that glyph, not to the prompt above it: a reply the TUI indented
+        // under the message it answers is the agent's, and a box is a dialog.
+        if (MSG_BULLET.test(next.trim()) || BOX_OPEN.test(next) || RESULT_LINE.test(next)) break;
+        body.push(next.trim());
+        i++;
+      }
+      const text = body.filter(Boolean).join('\n').trim();
+      // A bare "❯" with nothing under it is the empty input box, not a message.
+      if (text) blocks.push({ kind: 'user', text });
       continue;
     }
 
@@ -146,6 +192,20 @@ export function parsePane(paneText: string): Block[] {
     }
 
     i++;
+  }
+
+  // Nothing matched, but the pane is not empty: a TUI this grammar has never
+  // seen, or one that moved out from under it in a release. The screen's own
+  // text is worth more than an empty Messages view, which is what a pane with
+  // no recognised glyph used to render (a live Codex pane, every time). The
+  // Terminal tab shows the same text; this is the Messages tab refusing to
+  // claim there is nothing to read.
+  // The footer goes too, not just the chrome: an idle pane is often nothing but
+  // its own empty input box and status bar, and echoing that back as a message
+  // would turn "this agent has said nothing yet" into a wall of furniture.
+  if (!blocks.length) {
+    const text = toExcerpt(lines.filter((l) => !isChrome(l) && !PANE_FOOTER.test(l)));
+    if (text) blocks.push({ kind: 'raw', text });
   }
 
   return blocks;

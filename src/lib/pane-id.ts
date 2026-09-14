@@ -62,6 +62,26 @@ export function machineForRef(ref: string | null | undefined, machines: readonly
   return parseSessionRef(ref, machines).machine;
 }
 
+/**
+ * The machine a bridge pane id names, from the id alone.
+ *
+ * The counterpart of the orchestrator's `joinPaneId`: `box/w6:p1` is on box,
+ * `w95:p1` is local. Unlike `machineForRef` this needs no machine list, because
+ * the slash is unambiguous where a colon is not — which is the whole reason the
+ * bridge spells it this way.
+ *
+ * It must not be replaced by a lookup in the pane list. The bridge drops an
+ * unreachable machine's panes from /panes entirely, so exactly when a remote
+ * forward dies the pane leaves the index and a lookup answers `local` — the one
+ * answer that switches off the machine-down banner and the poll gate that exist
+ * for that case.
+ */
+export function machineForPaneId(paneId: string | null | undefined): string {
+  const text = String(paneId ?? '');
+  const slash = text.indexOf('/');
+  return slash > 0 ? text.slice(0, slash) : LOCAL;
+}
+
 /** True when a machine name is worth showing; the laptop is the unmarked case. */
 export function isRemote(machine: string): boolean {
   return !!machine && machine !== LOCAL;

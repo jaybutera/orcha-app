@@ -9,6 +9,7 @@
   import EmptyState from '../components/EmptyState.svelte';
   import ErrorBanner from '../components/ErrorBanner.svelte';
   import ActionSheet from '../components/ActionSheet.svelte';
+  import Icon from '../components/Icon.svelte';
   import { app } from '../lib/store.svelte';
   import { apiFailureText, projtrack } from '../lib/api';
   import { isSettled, liveTaskStatus } from '../lib/live';
@@ -18,8 +19,29 @@
 
   let {
     onOpenProject,
+    onOpenSessions,
     selectedId,
-  }: { onOpenProject: (id: number) => void; selectedId?: number } = $props();
+  }: {
+    onOpenProject: (id: number) => void;
+    onOpenSessions?: () => void;
+    selectedId?: number;
+  } = $props();
+
+  /**
+   * Live sessions, counted from the bridge rather than from the ledger.
+   *
+   * These are the panes themselves, so the figure includes the ones projtrack
+   * has no task for; those are the sessions this row exists to reach.
+   */
+  const paneCounts = $derived.by(() => {
+    let working = 0;
+    let blocked = 0;
+    for (const p of app.panes) {
+      if (p.agent_status === 'working') working += 1;
+      else if (p.agent_status === 'blocked') blocked += 1;
+    }
+    return { working, blocked, total: app.panes.length };
+  });
 
   type Filter = ProjectStatus | 'all';
 
@@ -194,6 +216,34 @@
 </Header>
 
 <div class="scroll">
+  <!-- Straight to the panes the bridge is serving. The project list below can
+       only reach a session projtrack has a task for, and most running panes
+       either have no task or have one whose ref names a pane that is gone. -->
+  {#if onOpenSessions}
+    <button class="sessions" onclick={onOpenSessions}>
+      <span class="mid">
+        <span class="t-body title">Sessions</span>
+        <span class="t-meta sub" class:failed={!app.panesKnown && app.bridgeError}>
+          {#if !app.panesKnown && app.bridgeError}
+            <!-- The list has never arrived and the poll knows why. Without this
+                 the row read "Asking the pane bridge…" for as long as the app
+                 was open, which is the silent forever-wait `app.bridgeError`
+                 was added to end. -->
+            {app.bridgeError}
+          {:else if !app.panesKnown}
+            Asking the pane bridge…
+          {:else if paneCounts.blocked}
+            {paneCounts.blocked} waiting on you · {paneCounts.working} working · {paneCounts.total} open
+          {:else}
+            {paneCounts.working} working · {paneCounts.total} open
+          {/if}
+        </span>
+      </span>
+      {#if paneCounts.blocked}<span class="badge"></span>{/if}
+      <span class="chev"><Icon name="forward" size={18} /></span>
+    </button>
+  {/if}
+
   <div class="filter">
     <SegmentedFilter options={FILTERS} value={filter} onChange={setFilter} />
   </div>
@@ -239,6 +289,45 @@
 />
 
 <style>
+  .sessions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    min-height: 56px;
+    padding: 12px 0;
+    text-align: left;
+    border-bottom: 1px solid var(--hairline);
+  }
+  .sessions .mid {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .sessions .sub {
+    color: var(--t-secondary);
+  }
+  /* The counts are one short line; a failure is a sentence naming an address,
+     so it is allowed the room to be read rather than clipped to "Can't reach
+     the pane bridge at http…". */
+  .sessions .sub.failed {
+    color: var(--c-alert);
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  .sessions .badge {
+    flex: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--c-alert);
+  }
+  .sessions .chev {
+    flex: none;
+    color: var(--t-tertiary);
+  }
   .scroll {
     flex: 1;
     min-height: 0;

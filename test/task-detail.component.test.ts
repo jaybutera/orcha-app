@@ -847,3 +847,229 @@ describe('while the pane list has not arrived', () => {
     expect(view.container.textContent).toContain('sendrawtransaction');
   });
 });
+
+// Opening a session directly on its pane (section 5.3c).
+//
+// The task route can only reach a session projtrack has a row for, and against
+// the live daemon on 2026-09-14 that was 6 of 11 running panes: 5 had no task
+// at all, and 16 of the 22 task refs named panes that no longer existed. These
+// are the cases that route could not serve.
+describe('a session opened on its pane', () => {
+  /** A Codex pane with no projtrack task, as /panes reports it. */
+  const CODEX_PANE: Pane = {
+    pane_id: 'wH5:p1',
+    machine: 'local',
+    workspace_id: 'wH5',
+    label: 'reserve yield design',
+    cwd: '/home/casper/src/launchpad-integrated',
+    agent_status: 'idle',
+    provider: 'codex',
+  };
+
+  const drawSession = (paneId: string) =>
+    render(TaskDetail, { props: { paneId, onBack: () => {} } });
+
+  beforeEach(() => {
+    app.setPanes([CODEX_PANE]);
+    app.setMachines([{ name: 'local', reachable: true }]);
+    app.panesKnown = true;
+    reads.mockResolvedValue({
+      pane_id: 'wH5:p1',
+      agent_status: 'idle' as const,
+      read_at: '2026-09-07T19:56:23Z',
+      text: '• The buffer is raw USDC and earns nothing.',
+    });
+  });
+
+  it('never asks projtrack for a task', async () => {
+    drawSession('wH5:p1');
+    await flush();
+    expect(task).not.toHaveBeenCalled();
+  });
+
+  it('reads the pane straight away, without waiting for a ledger row', async () => {
+    drawSession('wH5:p1');
+    await flush();
+    expect(reads).toHaveBeenCalled();
+    expect(reads.mock.calls[0][1]).toBe('wH5:p1');
+  });
+
+  it('shows what the agent said', async () => {
+    drawSession('wH5:p1');
+    await flush();
+    expect(await screen.findByText(/buffer is raw USDC/)).toBeTruthy();
+  });
+
+  it('is the live view even though the agent is idle', async () => {
+    // The task route needs `status === 'running'`, so an idle pane fell through
+    // to history mode and showed a note composer instead of the transcript.
+    drawSession('wH5:p1');
+    await flush();
+    expect(screen.getByPlaceholderText('Message this session…')).toBeTruthy();
+  });
+
+  it('keeps polling, so a reply appears without leaving the screen', async () => {
+    drawSession('wH5:p1');
+    await flush();
+    const first = reads.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(store.intervals.pane + 50);
+    await flush();
+    expect(reads.mock.calls.length).toBeGreaterThan(first);
+  });
+
+  it('titles the screen with the pane label rather than a blank task title', async () => {
+    drawSession('wH5:p1');
+    await flush();
+    expect(screen.getByText('reserve yield design')).toBeTruthy();
+  });
+
+  it('says so plainly when the bridge has dropped the pane', async () => {
+    // No ledger row behind this screen, so there is no history to fall back to.
+    app.setPanes([]);
+    reads.mockRejectedValue(new ApiError('HTTP 404', 404));
+    drawSession('wH5:p1');
+    await flush();
+    expect(await screen.findByText(/session is gone/i)).toBeTruthy();
+  });
+
+  it('does not render a blank transcript when the pane is silent', async () => {
+    // A read that succeeds with empty text used to draw nothing at all: the
+    // placeholder only covered the window before the first answer.
+    reads.mockResolvedValue({
+      pane_id: 'wH5:p1',
+      agent_status: 'idle' as const,
+      read_at: '2026-09-07T19:56:23Z',
+      text: '',
+    });
+    drawSession('wH5:p1');
+    await flush();
+    expect(await screen.findByText(/has not printed anything yet/i)).toBeTruthy();
+  });
+});
+
+// A remote session whose machine goes down (audit finding 1).
+//
+// The bridge drops an unreachable machine's panes from /panes, so the pane
+// leaves the index at exactly the moment the forward dies. Deriving the machine
+// from the index therefore answered 'local' during the outage: no banner, a
+// poll that kept collecting 503s while calling noteSuccess on each one, and a
+// stale transcript under a header still reporting the last status read.
+describe('a session on a machine that has gone down', () => {
+  const BOX_SESSION: Pane = {
+    pane_id: 'box/w6:p1',
+    machine: 'box',
+    workspace_id: 'w6',
+    label: 'traffic fix r1',
+    cwd: '/home/casper/src/zecp2p-traffic',
+    agent_status: 'working',
+  };
+
+  const drawSession = (paneId: string) =>
+    render(TaskDetail, { props: { paneId, onBack: () => {} } });
+
+  /** The bridge is up and says it cannot reach box; its panes are gone. */
+  function boxIsDown() {
+    app.setPanes([]);
+    app.setMachines([
+      { name: 'local', reachable: true },
+      { name: 'box', reachable: false },
+    ]);
+    app.panesKnown = true;
+    reads.mockRejectedValue(new ApiError('HTTP 503: box is unreachable', 503));
+  }
+
+  it('still knows the session is on box once its pane has left the list', async () => {
+    boxIsDown();
+    drawSession('box/w6:p1');
+    await flush();
+    expect(await screen.findByText(/Can't reach box/)).toBeTruthy();
+  });
+
+  it('stops polling a machine the bridge has marked unreachable', async () => {
+    boxIsDown();
+    drawSession('box/w6:p1');
+    await flush();
+    const after = reads.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(store.intervals.pane * 3 + 50);
+    await flush();
+    // machineListedDown gates the poll: every read could only return 503, and
+    // each one used to be counted as a success.
+    expect(reads.mock.calls.length).toBe(after);
+  });
+
+  it('polls normally while box is reachable', async () => {
+    app.setPanes([BOX_SESSION]);
+    app.setMachines([
+      { name: 'local', reachable: true },
+      { name: 'box', reachable: true },
+    ]);
+    app.panesKnown = true;
+    reads.mockResolvedValue({
+      pane_id: 'box/w6:p1',
+      machine: 'box',
+      agent_status: 'working' as const,
+      read_at: '2026-09-07T19:56:23Z',
+      text: '● Now the sendrawtransaction handler:',
+    });
+    drawSession('box/w6:p1');
+    await flush();
+    const first = reads.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(store.intervals.pane + 50);
+    await flush();
+    expect(reads.mock.calls.length).toBeGreaterThan(first);
+    expect(screen.queryByText(/Can't reach box/)).toBeNull();
+  });
+
+  it('leaves a local session alone', async () => {
+    // `local` must not pick up a machine-down banner from a machine list that
+    // happens to hold an unreachable box.
+    app.setPanes([]);
+    app.setMachines([
+      { name: 'local', reachable: true },
+      { name: 'box', reachable: false },
+    ]);
+    app.panesKnown = true;
+    reads.mockResolvedValue({
+      pane_id: 'w95:p1',
+      agent_status: 'idle' as const,
+      read_at: '2026-09-07T19:56:23Z',
+      text: '● local output',
+    });
+    drawSession('w95:p1');
+    await flush();
+    expect(screen.queryByText(/Can't reach/)).toBeNull();
+  });
+});
+
+// A first read that failed must not speak for the agent (audit finding 2).
+describe('a session whose first read failed', () => {
+  it('does not claim the agent printed nothing', async () => {
+    app.setPanes([]);
+    app.setMachines([{ name: 'local', reachable: true }]);
+    app.panesKnown = true;
+    reads.mockRejectedValue(new ApiError('Network error', 0));
+
+    render(TaskDetail, { props: { paneId: 'w95:p1', onBack: () => {} } });
+    await flush();
+
+    // Nothing has been read, so nothing is known about what the agent printed.
+    expect(screen.queryByText(/has not printed anything yet/i)).toBeNull();
+    expect(screen.getByText(/Reading pane/)).toBeTruthy();
+  });
+
+  it('says the session is silent only once a read has answered', async () => {
+    app.setPanes([]);
+    app.setMachines([{ name: 'local', reachable: true }]);
+    app.panesKnown = true;
+    reads.mockResolvedValue({
+      pane_id: 'w95:p1',
+      agent_status: 'idle' as const,
+      read_at: '2026-09-07T19:56:23Z',
+      text: '',
+    });
+
+    render(TaskDetail, { props: { paneId: 'w95:p1', onBack: () => {} } });
+    await flush();
+    expect(await screen.findByText(/has not printed anything yet/i)).toBeTruthy();
+  });
+});
