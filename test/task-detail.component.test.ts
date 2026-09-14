@@ -946,3 +946,130 @@ describe('a session opened on its pane', () => {
     expect(await screen.findByText(/has not printed anything yet/i)).toBeTruthy();
   });
 });
+
+// A remote session whose machine goes down (audit finding 1).
+//
+// The bridge drops an unreachable machine's panes from /panes, so the pane
+// leaves the index at exactly the moment the forward dies. Deriving the machine
+// from the index therefore answered 'local' during the outage: no banner, a
+// poll that kept collecting 503s while calling noteSuccess on each one, and a
+// stale transcript under a header still reporting the last status read.
+describe('a session on a machine that has gone down', () => {
+  const BOX_SESSION: Pane = {
+    pane_id: 'box/w6:p1',
+    machine: 'box',
+    workspace_id: 'w6',
+    label: 'traffic fix r1',
+    cwd: '/home/casper/src/zecp2p-traffic',
+    agent_status: 'working',
+  };
+
+  const drawSession = (paneId: string) =>
+    render(TaskDetail, { props: { paneId, onBack: () => {} } });
+
+  /** The bridge is up and says it cannot reach box; its panes are gone. */
+  function boxIsDown() {
+    app.setPanes([]);
+    app.setMachines([
+      { name: 'local', reachable: true },
+      { name: 'box', reachable: false },
+    ]);
+    app.panesKnown = true;
+    reads.mockRejectedValue(new ApiError('HTTP 503: box is unreachable', 503));
+  }
+
+  it('still knows the session is on box once its pane has left the list', async () => {
+    boxIsDown();
+    drawSession('box/w6:p1');
+    await flush();
+    expect(await screen.findByText(/Can't reach box/)).toBeTruthy();
+  });
+
+  it('stops polling a machine the bridge has marked unreachable', async () => {
+    boxIsDown();
+    drawSession('box/w6:p1');
+    await flush();
+    const after = reads.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(store.intervals.pane * 3 + 50);
+    await flush();
+    // machineListedDown gates the poll: every read could only return 503, and
+    // each one used to be counted as a success.
+    expect(reads.mock.calls.length).toBe(after);
+  });
+
+  it('polls normally while box is reachable', async () => {
+    app.setPanes([BOX_SESSION]);
+    app.setMachines([
+      { name: 'local', reachable: true },
+      { name: 'box', reachable: true },
+    ]);
+    app.panesKnown = true;
+    reads.mockResolvedValue({
+      pane_id: 'box/w6:p1',
+      machine: 'box',
+      agent_status: 'working' as const,
+      read_at: '2026-09-07T19:56:23Z',
+      text: '● Now the sendrawtransaction handler:',
+    });
+    drawSession('box/w6:p1');
+    await flush();
+    const first = reads.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(store.intervals.pane + 50);
+    await flush();
+    expect(reads.mock.calls.length).toBeGreaterThan(first);
+    expect(screen.queryByText(/Can't reach box/)).toBeNull();
+  });
+
+  it('leaves a local session alone', async () => {
+    // `local` must not pick up a machine-down banner from a machine list that
+    // happens to hold an unreachable box.
+    app.setPanes([]);
+    app.setMachines([
+      { name: 'local', reachable: true },
+      { name: 'box', reachable: false },
+    ]);
+    app.panesKnown = true;
+    reads.mockResolvedValue({
+      pane_id: 'w95:p1',
+      agent_status: 'idle' as const,
+      read_at: '2026-09-07T19:56:23Z',
+      text: '● local output',
+    });
+    drawSession('w95:p1');
+    await flush();
+    expect(screen.queryByText(/Can't reach/)).toBeNull();
+  });
+});
+
+// A first read that failed must not speak for the agent (audit finding 2).
+describe('a session whose first read failed', () => {
+  it('does not claim the agent printed nothing', async () => {
+    app.setPanes([]);
+    app.setMachines([{ name: 'local', reachable: true }]);
+    app.panesKnown = true;
+    reads.mockRejectedValue(new ApiError('Network error', 0));
+
+    render(TaskDetail, { props: { paneId: 'w95:p1', onBack: () => {} } });
+    await flush();
+
+    // Nothing has been read, so nothing is known about what the agent printed.
+    expect(screen.queryByText(/has not printed anything yet/i)).toBeNull();
+    expect(screen.getByText(/Reading pane/)).toBeTruthy();
+  });
+
+  it('says the session is silent only once a read has answered', async () => {
+    app.setPanes([]);
+    app.setMachines([{ name: 'local', reachable: true }]);
+    app.panesKnown = true;
+    reads.mockResolvedValue({
+      pane_id: 'w95:p1',
+      agent_status: 'idle' as const,
+      read_at: '2026-09-07T19:56:23Z',
+      text: '',
+    });
+
+    render(TaskDetail, { props: { paneId: 'w95:p1', onBack: () => {} } });
+    await flush();
+    expect(await screen.findByText(/has not printed anything yet/i)).toBeTruthy();
+  });
+});

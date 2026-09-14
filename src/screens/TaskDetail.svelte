@@ -72,7 +72,18 @@
   /** Set when the bridge answered but could not reach the machine the pane is on. */
   let machineUnreachable = $state(false);
   let paneFailures = 0;
-  let firstRead = $state(true);
+  /**
+   * Whether any read has come back with an answer, as opposed to having run.
+   *
+   * This replaces a `firstRead` flag cleared in the read's `finally`, which
+   * went false on a read that threw. The difference is the whole bug: a bridge
+   * that failed on the first call put "This session has not printed anything
+   * yet" on screen — a statement about the agent — when nothing had been read
+   * at all, and it stood for up to two more poll intervals before the failure
+   * count reached three and the error banner replaced it. Only a read that
+   * answered can say what the agent has or has not printed.
+   */
+  let paneAnswered = $state(false);
   let view = $state<'messages' | 'terminal'>('messages');
   /** Set when a finished task's session is still alive and the user opened it. */
   let forceLive = $state(false);
@@ -327,6 +338,7 @@
       paneError = null;
       machineUnreachable = false;
       paneFailures = 0;
+      paneAnswered = true;
       app.noteSuccess();
     } catch (e) {
       if (e instanceof ApiError && e.status === 404) {
@@ -359,8 +371,6 @@
           !!app.settings.token
         );
       app.noteFailure();
-    } finally {
-      firstRead = false;
     }
   }
 
@@ -638,13 +648,18 @@
         <p class="earlier-end t-meta">Start of available scrollback</p>
       {/if}
     {/if}
-    {#if firstRead && !paneText}
+    {#if !paneText && !paneAnswered}
+      <!-- Nothing has been read yet, whether because the first read is still in
+           flight or because it failed. Either way the honest line is that the
+           pane is being read; what the agent has printed is not yet known, and
+           the error banner below says so once the failures add up. -->
       <p class="t-meta center">{waitingLabel}</p>
     {:else if !paneText}
-      <!-- A read has completed and the screen was empty. Rendering the block
-           loop here drew literally nothing: a blank scroller under a header
-           saying "Working", with no way to tell a silent agent from a broken
-           view. `firstRead` only covers the window before the first answer. -->
+      <!-- A read came back, and the screen was empty. Rendering the block loop
+           here drew literally nothing: a blank scroller under a header saying
+           "Working", with no way to tell a silent agent from a broken view.
+           Gated on a read having answered, not merely having run, so a failed
+           read never states a fact about the agent. -->
       <EmptyState text="This session has not printed anything yet" />
     {:else if view === 'terminal'}
       <TerminalView text={paneText} />
