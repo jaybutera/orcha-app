@@ -1,0 +1,198 @@
+  Failure modes and decisions
+  All TVL in one contract. A bug in the curve is a bug against every launch. Keep the curve to constant product, no exponents, no density functions. Bunni's exploit was rounding in a fancier curve's withdrawal math.
+  Aave illiquid on a sell. Withdraw reverts when the market's idle USDC is below the request. Check USDC.balanceOf(aMonUSDC) first and revert with a named error. Only bites when one sell wants a meaningful slice of Monad's
+  whole USDC lending market.
+  Exact-output swaps. Need the curve inverted plus Aave rounding. Reject them, as the existing aToken wrap hook does, or over-withdraw by a wei and eat the dust.
+  Settle a wei short. aToken transfers can credit one wei under the figure sent. The hook only ever settles USDC and the launch token, both exact-transfer, so the wrap hooks' rounding paths do not recur. Assert it anyway.
+  Quoting. The V4Quoter runs the real swap in a reverting simulation, hook included. The virtual reserve must live in hook storage, not in a view the quoter cannot reach.
+  Gas. Every swap that crosses the buffer pays for one Aave call. Fine on Monad, worth stating in the docs.
+  Index-based yield vs. buffer. The buffer is raw USDC and earns nothing. Keep it small, a few percent of principal, and refill it from buys before touching Aave.
+  Dormant coin's remaining holders lose their drift. They can revive it with one swap. Say so on the coin page.
+  Redirect gaming. Pro rata by fees makes wash trading cost more than the pot. Re-check the math if the fee ever drops or the pot ever gets large.
+  Build order
+  LaunchHook with Compound only. Curve, virtual reserve, graduation flip, buffer, Aave supply and withdraw, fee, harvest that bumps principal. Fork test against Monad Aave with one launch: buy, sell, graduate, warp a year,
+  harvest, assert principal grew by the index.
+  LaunchFactory and LaunchToken. Deploy, initialize, register, launchAndBuy. Route a swap through the Universal Router and the V4Quoter on a fork.
+  Dormancy and redirect. Epoch fee accounting, the pot, pro-rata split. Fork test with three pools, one warped past the window.
+  FeeEscrow. Move fee payout from direct transfer to claims.
+  Floor, then Holders. Separate contracts behind the policy enum, each with its own fork test. Treasury is a transfer and needs nothing.
+  Keeper. Repurpose the finalizer bot to call harvest on a schedule. Everything it calls is permissionless.
+  Nothing here goes on chain before key rotation and real economics, same as before.
+
+
+• This shares the core of our latest design, but expands it to replace the bonding curve and graduation flow too. I’m checking the interest accounting—the shared aMonUSDC balance and cash buffers make its proposed formula
+  particularly important.
+
+• Searching the web
+
+• Searched the web for https://raw.githubusercontent.com/aave/aave-v3-core/master/contracts/protocol/tokenization/AToken.sol
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Yes—more changes to the existing launchpad, but potentially a cleaner end-state. It shares the core of our latest design: USDC/TOK trading, a hook that owns and prices reserves, and interest separated from recorded trading
+  principal.
+
+  The extra scope is here:
+
+   Area                Our latest design                              Your friend’s design
+  ━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   Bonding curve       Keep existing phase initially                  Move it into the same hook
+  ──────────────────  ─────────────────────────────────────────────  ─────────────────────────────────────────────────────────
+   Graduation          Fund the custom pool                           Change state and burn tokens in place
+  ──────────────────  ─────────────────────────────────────────────  ─────────────────────────────────────────────────────────
+   Aave integration    Hold waMonUSDC                                 Hold aMonUSDC directly
+  ──────────────────  ─────────────────────────────────────────────  ─────────────────────────────────────────────────────────
+   Custody             Prefer isolation initially; shared possible    One contract holds every launch
+  ──────────────────  ─────────────────────────────────────────────  ─────────────────────────────────────────────────────────
+   Yield behavior      Separate treasury and configured strategy      Compounding plus dormancy and cross-pool redistribution
+
+  My favorite part is the same pool existing from launch through graduation. Once we’re already building a custom AMM, using that same engine for the bonding curve makes architectural sense. V4 supports replacing its native
+  curve through custom accounting. Uniswap documentation (https://developers.uniswap.org/docs/protocols/v4/guides/custom-accounting)
+
+  The graduation formula also preserves the stated spot price algebraically. It does change market depth, so “same price” doesn’t mean subsequent trades behave identically.
+
+  But several passages make unfinished accounting sound settled:
+
+  - The interest formula loses accrued yield if implemented literally. Suppose principal is 100 and backing grows to 105. A buy adds 10. Resetting scaledPrincipal = 110 / currentIndex makes calculated yield immediately zero,
+    although the previous 5 still exists. They need to preserve or explicitly allocate that yield before updating the record.
+
+  - It credits interest to cash that isn’t invested. Principal includes the USDC buffer, but the formula applies Aave’s index to all principal. With 100 principal and 10 sitting in cash, only 90 earns. The displayed aToken-only
+    solvency invariant also omits that cash. Aave’s index scales actual aToken holdings; their internal allocation must follow invested amounts. Aave implementation
+    (https://raw.githubusercontent.com/aave/aave-v3-core/master/contracts/protocol/tokenization/AToken.sol)
+
+  - “Wash trading loses money” isn’t established. Profit depends on the reward share and fees the trader actually loses after any creator/protocol rebates. A small pot alone doesn’t prove the mechanism safe.
+  - The Floor is a substantial additional feature. A standing buy wall inside a constant-product system needs its own pricing, funding, and execution rules. It isn’t just a yield destination address.
+  - Existing router success doesn’t establish support for this new hook. Discovery and routing still need verification with its actual settlement behavior.
+
+  Direct aMonUSDC custody is reasonable here: users still exchange ordinary USDC, so rebasing stays internal. It trades the wrapper layer for more Aave-specific accounting responsibility.
+
+  I’d borrow the unified curve/graduation architecture, while treating dormancy redistribution and the Floor as separate product decisions. That would broaden our implementation now but could eliminate considerable migration
+  machinery. The “dead coins fund living ones” idea is interesting; it’s also where much of the additional economic complexity enters.
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+─ Conversation recap ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  We’re assessing ticker.gg’s hook-owned AMM spec against the existing launchpad design. It shares the USDC/TOK trading approach but would require further changes; next is to review the full spec and identify those changes.
+
+
+› what do you mean eliminate migration machinery? When it comes to defi, every line we change must be audited by a team of security professionals. And every changed line risks losing it all to a hack or bug. So we always
+  strive to change the least required to get what we need
+
+
+• I meant the code that moves assets from the bonding curve into the graduated pool, creates the liquidity position, and locks it. Your friend’s design replaces that process with a phase change inside one hook.
+
+  But removing those components requires rewriting their behavior elsewhere. Fewer contracts afterward doesn’t mean fewer changed lines, less audit work, or lower risk. I put too much weight on architectural tidiness.
+
+  Under your constraint, I would keep the existing bonding curve and leave its operation untouched, then limit changes to what’s required to support reserve-interest harvesting after graduation. No unified launch-to-graduation
+  AMM, dormancy redistribution, or new floor mechanism unless you specifically need those features.
+
+  Our latest design still requires substantial new pricing, settlement, and custody code for the graduated pool. We shouldn’t call that minimal without comparing alternatives against the existing implementation. The right
+  criterion is the smallest necessary change to trusted behavior that delivers the feature, not the fewest contracts in the eventual diagram.
+
+
+› https://media.discordapp.net/attachments/1546988236763562094/1548220560104886303/CleanShot_2026-09-12_at_01.35.042x.png?ex=6aa64442&is=6aa4f2c2&hm=232d917f5bb3692b67408dd81da79cf70bd17fee72427667a2bcc9efd587d0a9&=&format=web
+  p&quality=lossless
+  can you see this
+
+
+• I’ll open the image.
+
+• Searching the web
+
+• Searched the web for
+  https://media.discordapp.net/attachments/1546988236763562094/1548220560104886303/CleanShot_2026-09-12_at_01.35.042x.png?ex=6aa64442&is=6aa4f2c2&hm=232d917f5bb3692b67408dd81da79cf70bd17fee72427667a2bcc9efd587d0a9&=&format=webp&quality=lossless
+
+• Ran curl -L --max-time 20 -sS -o /tmp/reserve-discussion-discord.webp -w '%{http_code} %{content_type} %{size_download}\n'
+  │ 'https://media.discordapp.net/attachments/1546988236763562094/1548220560104886303/CleanShot_2026-09-12_at_01.35.042x.png?ex=6aa64442&is=6aa4f2c2&hm=232d917f5bb3692b67408dd81da79cf70bd17fee72427667a2bcc9efd587d0a9&=&format=webp&quality=lossless'
+  └ 200 image/webp 370424
+
+• Viewed Image
+  └ /tmp/reserve-discussion-discord.webp
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Yes, I can read it clearly. It’s discussing how a hook-owned reserve pool could appear to indexers as having zero liquidity, causing problems with pricing, routing, charts, and “locked LP” indicators.
+
+  That concern applies to our latest custom reserve-hook design too, not just your friend’s expanded version. The screenshot’s specific claims about each platform would need verification.
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+› he says "i have a feeling this idea might lead to a dead end in its current form bc of the zero liq pool thing"
+
+
+• I think that’s a credible concern. The design could work as an AMM and still fail as a launchpad product if the trading tools people use can’t discover it, price it, or recognize its liquidity.
+
+  The money would exist in the hook, but services expecting standard Uniswap liquidity might see an empty pool. Fixing that could require integrations with outside platforms—work we don’t control. And yes, our latest reserve-
+  manager design has that same issue. I understated how consequential the routing compatibility question was.
+
+  Given your priority of minimal changes, I’d pause that architecture rather than build around an unverified assumption. Keeping a standard pool preserves more existing behavior, but we still haven’t established a small, safe
+  way to extract its embedded waMonUSDC interest while preserving the liquidity lock.
+
+  Also, the screenshot’s proposed test needs correcting: a local fork can verify swap execution, but public indexers won’t see its trades. Testing their discovery requires a supported public environment or direct confirmation
+  from those platforms.
+
+  So I wouldn’t declare it impossible, but I would treat compatibility as a prerequisite to pursuing it—not something to sort out after implementation.
+
+
+› explain the issue
+
+
+• Normally, a Uniswap pool holds the liquidity and records the price. Trading apps read that information to show “$50,000 liquidity,” draw charts, and find trading routes.
+
+  In our proposed design, the hook holds the money and calculates the price itself. Uniswap still handles settlement, but its standard pool has no normal liquidity position.
+
+  So there are two different views:
+
+  - Our hook: “I have USDC invested in Aave and tokens available to trade.”
+  - An app reading standard Uniswap pool data: “This pool has zero liquidity.”
+
+  A router that understands the hook could execute trades successfully. But another app might exclude the pool before even trying a trade, show no price, or produce incorrect charts. Tools looking for a locked LP position also
+  wouldn’t find one.
+
+  The issue isn’t missing money—it’s that the money and pricing live somewhere existing tools may not understand. We can make our own website understand it. Getting outside trading apps, chart sites, and scanners to understand
+  it may require their cooperation. That’s why a technically working design could still be a dead end for the launchpad.
+
+
+› ya thats a huge issue because launchpads use terminals etc. Any solution?
+
+
+• There are alternatives, but no established small fix that preserves all our requirements. If terminals are essential, I’d keep a standard Uniswap pool with real liquidity and standard pricing.
+
+  That leaves three directions:
+
+  - Keep waMonUSDC/TOK and let interest stay in the pool. This preserves the existing architecture, but gives up separately spending reserve interest. Custom actions could use trading fees instead.
+  - Revisit pUSDC/TOK. The wrapper separates interest outside a standard pool, preserving normal liquidity and swap behavior. But your concern about trusting a new token remains, and quote-token pricing/discovery would still
+    need verification.
+
+  - Keep waMonUSDC/TOK and replace the permanent locker with a tightly constrained liquidity manager. It could withdraw liquidity to realize interest. That introduces difficult accounting, returns both assets, and changes the
+    liquidity-lock guarantee.
+
+  I would not assume adding a tiny standard liquidity position fixes the custom-hook design. Terminals could still see the wrong liquidity or price, and routing might behave differently.
+
+  Given your priorities, the first decision is whether spending reserve interest is indispensable. If it is, we need to compare the wrapper and managed-liquidity approaches against the existing code before choosing. If it
+  isn’t, keeping the current pool and funding custom behavior from fees is the smallest departure.
+
+
+› correct reporting for existing tools for users is more important than minimal code changes
+
+
+• Understood. Correct pricing, liquidity reporting, charts, and routing in existing terminals are a requirement. Minimizing code changes comes after that.
+
+  That rules out pursuing the zero-native-liquidity hook unless compatibility is demonstrated across the tools your users rely on.
+
+  The next design to investigate is a standard waMonUSDC/TOK pool with a constrained liquidity manager. It preserves the familiar quote token and normal pool structure while potentially allowing interest extraction. The
+  difficult part is withdrawing actual interest without consuming trading principal or misrepresenting the liquidity protection.
+
+  The pUSDC wrapper remains another candidate, but its unfamiliar quote token could introduce reporting issues of its own. Neither should be selected until we verify the user-facing reporting.
+
+─ Conversation recap ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  Correct pricing, liquidity reporting, charts, and routing in existing terminals take priority over minimal code changes. The zero-native-liquidity hook is ruled out unless compatibility is demonstrated; the next step is to
+  verify compatibility before pursuing that approach.
+
+
+› Ask Codex to do anything
+
+  gpt-6-astra medium · ~/src/launchpad-integrated
