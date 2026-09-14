@@ -154,3 +154,49 @@ describe('parsePane', () => {
     });
   });
 });
+
+// A prompt longer than the pane is wide wraps, and the continuation lines carry
+// no glyph. They used to match nothing and be discarded, so a reader saw the
+// first line of their own message and nothing after it. Rare on Claude Code,
+// the common case on Codex, whose composer takes multi-line input.
+describe('a prompt that wrapped across lines', () => {
+  it('keeps the continuation, not just the first line', () => {
+    const text = [
+      '› what do you mean eliminate migration machinery? When it comes to defi,',
+      '  every line we change must be audited',
+      '',
+      '• I think that is a credible concern.',
+    ].join('\n');
+    const user = parsePane(text).find((b) => b.kind === 'user');
+    expect(user && user.kind === 'user' && user.text).toContain('every line we change must be audited');
+  });
+
+  it('ends the prompt at the blank line, not at the next glyph', () => {
+    // The empty composer's own prompt line sits two lines above the model and
+    // cwd status bar. Running past the blank line would absorb it.
+    const text = ['› ', '', '  gpt-6-astra medium · ~/src/launchpad-integrated'].join('\n');
+    const user = parsePane(text).find((b) => b.kind === 'user');
+    expect(user).toBeUndefined();
+  });
+
+  it('does not take an indented agent bullet as a continuation', () => {
+    const text = ['❯ run the tests', '  ● Running them now.'].join('\n');
+    const blocks = parsePane(text);
+    const user = blocks.find((b) => b.kind === 'user');
+    expect(user && user.kind === 'user' && user.text).toBe('run the tests');
+  });
+
+  it('reads the wrapped prompts out of the live Codex capture', () => {
+    const users = parsePane(codex).filter((b) => b.kind === 'user') as { text: string }[];
+    expect(users.some((u) => u.text.includes('\n'))).toBe(true);
+    // The status bar is not part of anything Casper typed.
+    expect(users.some((u) => u.text.includes('gpt-6-astra'))).toBe(false);
+  });
+
+  it('does not read the empty composer placeholder as a message', () => {
+    // "Ask Codex to do anything" is drawn inside the input box, on the prompt
+    // line, so it read as the last thing Casper said in every idle Codex pane.
+    const users = parsePane(codex).filter((b) => b.kind === 'user') as { text: string }[];
+    expect(users.some((u) => u.text.includes('Ask Codex to do anything'))).toBe(false);
+  });
+});

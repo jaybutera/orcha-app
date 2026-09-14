@@ -52,6 +52,10 @@ const PANE_FOOTER = /^\s*(?:[─━]{3,}\s*$|[❯›]|⏵|[✻✽✶✳✢]\s|�
 const PANE_CHROME: RegExp[] = [
   /^\s*[─━]{3,}\s*$/,
   /^\s*⧉/,
+  // The placeholder text an empty composer draws inside the input box. It sits
+  // on the prompt line, so it reads as something Casper typed; it is the one
+  // thing on that line they did not type.
+  /^\s*(?:Ask Codex to do anything|Try ".{0,60}")\s*$/,
   /\/clear to save \S+ tokens/,
   /\(disable recaps in \/config\)/,
   /^\s*\? for shortcuts/,
@@ -118,10 +122,34 @@ export function parsePane(paneText: string): Block[] {
     // Casper's own prompt, echoed in the pane.
     const user = USER_PROMPT.exec(line);
     if (user) {
-      const text = user[1].trim();
-      // A bare "❯" is the empty input box, not a message.
-      if (text) blocks.push({ kind: 'user', text });
+      const head = isChrome(user[1]) ? '' : user[1].trim();
       i++;
+      // A prompt longer than the pane is wide wraps, and the continuations are
+      // indented under it with no glyph of their own, so they matched nothing
+      // and fell through to the discard at the bottom of the loop: the reader
+      // saw the first line of their own message and nothing after it. Rare on
+      // Claude Code, where prompts are usually short, and the common case on
+      // Codex, whose composer takes multi-line input.
+      //
+      // Only indented, non-empty, non-chrome lines continue it. A blank line
+      // ends the prompt, which is what keeps the empty composer's own `›` from
+      // swallowing the model and cwd status bar two lines below it.
+      const body = [head];
+      while (i < lines.length) {
+        const next = lines[i];
+        if (!next.trim()) break;
+        if (!/^\s{2,}\S/.test(next)) break;
+        if (isChrome(next) || PANE_FOOTER.test(next)) break;
+        // An indented line that opens with a glyph belongs to whoever draws
+        // that glyph, not to the prompt above it: a reply the TUI indented
+        // under the message it answers is the agent's, and a box is a dialog.
+        if (MSG_BULLET.test(next.trim()) || BOX_OPEN.test(next) || RESULT_LINE.test(next)) break;
+        body.push(next.trim());
+        i++;
+      }
+      const text = body.filter(Boolean).join('\n').trim();
+      // A bare "❯" with nothing under it is the empty input box, not a message.
+      if (text) blocks.push({ kind: 'user', text });
       continue;
     }
 
