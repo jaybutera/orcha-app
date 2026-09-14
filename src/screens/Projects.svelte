@@ -223,8 +223,14 @@
     <button class="sessions" onclick={onOpenSessions}>
       <span class="mid">
         <span class="t-body title">Sessions</span>
-        <span class="t-meta sub">
-          {#if !app.panesKnown}
+        <span class="t-meta sub" class:failed={!app.panesKnown && app.bridgeError}>
+          {#if !app.panesKnown && app.bridgeError}
+            <!-- The list has never arrived and the poll knows why. Without this
+                 the row read "Asking the pane bridge…" for as long as the app
+                 was open, which is the silent forever-wait `app.bridgeError`
+                 was added to end. -->
+            {app.bridgeError}
+          {:else if !app.panesKnown}
             Asking the pane bridge…
           {:else if paneCounts.blocked}
             {paneCounts.blocked} waiting on you · {paneCounts.working} working · {paneCounts.total} open
@@ -302,6 +308,14 @@
   }
   .sessions .sub {
     color: var(--t-secondary);
+  }
+  /* The counts are one short line; a failure is a sentence naming an address,
+     so it is allowed the room to be read rather than clipped to "Can't reach
+     the pane bridge at http…". */
+  .sessions .sub.failed {
+    color: var(--c-alert);
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
   .sessions .badge {
     flex: none;
